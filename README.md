@@ -67,6 +67,9 @@
 ![Hardware Components](4.png)
 *Complete hardware setup with ESP32, display, and LEDs*
 
+![image](https://github.com/user-attachments/assets/e0d34f04-3f6f-409e-a3de-dd530dd37d91)
+![image](https://github.com/user-attachments/assets/8debaee2-fec0-46e0-9098-058e186e2492)
+
 </div>
 
 ### 🛠️ Required Components
