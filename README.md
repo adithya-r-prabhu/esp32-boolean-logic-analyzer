@@ -2,7 +2,8 @@
 
 <div align="center">
 
-Project based on IEC121	Digital Design and Electric Circuits,IEC213	Microprocessors and Microcontrollers
+## Project based on IEC121	Digital Design and Electric Circuits,IEC213	Microprocessors and Microcontrollers
+
 **A comprehensive Boolean logic evaluation system with web interface, TFT display, and dual LED indicators**
 
 <img src="1.jpg" alt="Hardware Setup" width="500">
