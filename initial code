@@ -1,0 +1,549 @@
+#include <WiFi.h>
+#include <WebServer.h>
+
+// Network configuration
+const char* AP_SSID = "LogicEvaluator";
+const char* AP_PASSWORD = "logic123";
+
+// Hardware configuration
+const int LOGIC_LED = 2;  // Built-in LED on ESP32
+
+// Web server
+WebServer server(80);
+
+// Logic evaluation state
+struct LogicState {
+  String expression;
+  String variables;
+  bool result;
+  bool hasResult;
+  String truthTable;
+} currentState = {"", "", false, false, ""};
+
+// Variable storage
+struct LogicVariable {
+  char name;
+  bool value;
+};
+
+LogicVariable vars[8];
+int varCount = 0;
+
+// Truth table structure
+struct TruthTableRow {
+  String inputs;
+  bool output;
+};
+
+void setup() {
+  Serial.begin(115200);
+  
+  // Initialize hardware
+  pinMode(LOGIC_LED, OUTPUT);
+  digitalWrite(LOGIC_LED, LOW);
+  
+  // Test LED on startup
+  blinkStartupSequence();
+  
+  // Setup WiFi AP
+  Serial.println("Starting WiFi Access Point...");
+  WiFi.softAP(AP_SSID, AP_PASSWORD);
+  
+  IPAddress ip = WiFi.softAPIP();
+  Serial.println("WiFi AP started");
+  Serial.print("Network: ");
+  Serial.println(AP_SSID);
+  Serial.print("Password: ");
+  Serial.println(AP_PASSWORD);
+  Serial.print("IP: ");
+  Serial.println(ip);
+  
+  // Setup web routes
+  server.on("/", handleHomePage);
+  server.on("/evaluate", HTTP_POST, handleLogicEvaluation);
+  server.on("/status", handleStatus);
+  server.on("/truthtable", HTTP_POST, handleTruthTable);
+  server.on("/testrow", HTTP_POST, handleTestRow);
+  
+  server.begin();
+  Serial.println("Web server started");
+  Serial.print("Open browser: http://");
+  Serial.println(ip);
+}
+
+void loop() {
+  server.handleClient();
+}
+
+void blinkStartupSequence() {
+  for (int i = 0; i < 3; i++) {
+    digitalWrite(LOGIC_LED, HIGH);
+    delay(200);
+    digitalWrite(LOGIC_LED, LOW);
+    delay(200);
+  }
+}
+
+void handleHomePage() {
+  server.send(200, "text/html", generateWebPage());
+}
+
+void handleLogicEvaluation() {
+  if (!server.hasArg("expression") || !server.hasArg("variables")) {
+    server.send(400, "application/json", "{\"error\":\"Missing parameters\"}");
+    return;
+  }
+  
+  currentState.expression = server.arg("expression");
+  currentState.variables = server.arg("variables");
+  
+  // Parse and evaluate
+  if (parseVariables(currentState.variables)) {
+    currentState.result = evaluateLogic(currentState.expression);
+    currentState.hasResult = true;
+    
+    // Update LED
+    digitalWrite(LOGIC_LED, currentState.result ? HIGH : LOW);
+    
+    // Send response
+    String response = "{";
+    response += "\"result\":" + String(currentState.result ? "true" : "false") + ",";
+    response += "\"expression\":\"" + currentState.expression + "\",";
+    response += "\"variables\":\"" + currentState.variables + "\",";
+    response += "\"led\":\"" + String(currentState.result ? "ON" : "OFF") + "\"";
+    response += "}";
+    
+    server.send(200, "application/json", response);
+  } else {
+    server.send(400, "application/json", "{\"error\":\"Invalid variable format\"}");
+  }
+}
+
+void handleTruthTable() {
+  if (!server.hasArg("expression")) {
+    server.send(400, "application/json", "{\"error\":\"Missing expression\"}");
+    return;
+  }
+  
+  String expression = server.arg("expression");
+  String truthTableJson = generateTruthTable(expression);
+  
+  server.send(200, "application/json", truthTableJson);
+}
+
+void handleTestRow() {
+  if (!server.hasArg("variables")) {
+    server.send(400, "application/json", "{\"error\":\"Missing variables\"}");
+    return;
+  }
+  
+  String variables = server.arg("variables");
+  
+  if (parseVariables(variables)) {
+    bool result = evaluateLogic(currentState.expression);
+    
+    // Update LED
+    digitalWrite(LOGIC_LED, result ? HIGH : LOW);
+    
+    String response = "{";
+    response += "\"result\":" + String(result ? "true" : "false") + ",";
+    response += "\"led\":\"" + String(result ? "ON" : "OFF") + "\"";
+    response += "}";
+    
+    server.send(200, "application/json", response);
+  } else {
+    server.send(400, "application/json", "{\"error\":\"Invalid variable format\"}");
+  }
+}
+
+void handleStatus() {
+  String response = "{";
+  response += "\"result\":" + String(currentState.result ? "true" : "false") + ",";
+  response += "\"expression\":\"" + currentState.expression + "\",";
+  response += "\"variables\":\"" + currentState.variables + "\",";
+  response += "\"led\":\"" + String(currentState.result ? "ON" : "OFF") + "\"";
+  response += "}";
+  
+  server.send(200, "application/json", response);
+}
+
+String generateTruthTable(String expression) {
+  // Extract unique variables from expression
+  String uniqueVars = "";
+  for (int i = 0; i < expression.length(); i++) {
+    char c = expression.charAt(i);
+    if (isalpha(c) && uniqueVars.indexOf(c) == -1) {
+      uniqueVars += c;
+    }
+  }
+  
+  int numVars = uniqueVars.length();
+  int numRows = 1 << numVars; // 2^numVars
+  
+  String json = "{\"variables\":[";
+  for (int i = 0; i < numVars; i++) {
+    json += "\"" + String(uniqueVars.charAt(i)) + "\"";
+    if (i < numVars - 1) json += ",";
+  }
+  json += "],\"rows\":[";
+  
+  // Generate all combinations
+  for (int row = 0; row < numRows; row++) {
+    String varString = "";
+    
+    // Set variables for this row
+    varCount = 0;
+    for (int var = 0; var < numVars; var++) {
+      bool value = (row >> (numVars - 1 - var)) & 1;
+      vars[varCount].name = uniqueVars.charAt(var);
+      vars[varCount].value = value;
+      varCount++;
+      
+      if (varString.length() > 0) varString += ",";
+      varString += String(uniqueVars.charAt(var)) + "=" + String(value ? "1" : "0");
+    }
+    
+    // Evaluate expression for this combination
+    bool result = evaluateLogic(expression);
+    
+    json += "{\"inputs\":\"" + varString + "\",\"output\":" + String(result ? "true" : "false") + "}";
+    if (row < numRows - 1) json += ",";
+  }
+  
+  json += "]}";
+  return json;
+}
+
+bool parseVariables(String input) {
+  varCount = 0;
+  input.trim();
+  
+  int pos = 0;
+  while (pos < input.length() && varCount < 8) {
+    int equals = input.indexOf('=', pos);
+    if (equals == -1) break;
+    
+    int comma = input.indexOf(',', equals);
+    if (comma == -1) comma = input.length();
+    
+    char varName = input.charAt(equals - 1);
+    char varValue = input.charAt(equals + 1);
+    
+    if (varValue == '1' || varValue == '0') {
+      vars[varCount].name = varName;
+      vars[varCount].value = (varValue == '1');
+      varCount++;
+    }
+    
+    pos = comma + 1;
+  }
+  
+  return varCount > 0;
+}
+
+bool getVariableValue(char name) {
+  for (int i = 0; i < varCount; i++) {
+    if (vars[i].name == name) {
+      return vars[i].value;
+    }
+  }
+  return false;
+}
+
+bool evaluateLogic(String expr) {
+  expr.replace(" ", "");
+  int pos = 0;
+  return evaluateOr(expr, pos);
+}
+
+// Operator precedence implementation
+// Level 1: OR, NOR (lowest precedence)
+bool evaluateOr(String expr, int& pos) {
+  bool result = evaluateXor(expr, pos);
+  
+  while (pos < expr.length()) {
+    if (expr.charAt(pos) == '|') {
+      pos++; // Skip '|'
+      result = result || evaluateXor(expr, pos);
+    } else if (pos < expr.length() - 1 && expr.charAt(pos) == '~' && expr.charAt(pos + 1) == '|') {
+      pos += 2; // Skip '~|' (NOR)
+      result = !(result || evaluateXor(expr, pos));
+    } else {
+      break;
+    }
+  }
+  
+  return result;
+}
+
+// Level 2: XOR, XNOR
+bool evaluateXor(String expr, int& pos) {
+  bool result = evaluateAnd(expr, pos);
+  
+  while (pos < expr.length()) {
+    if (expr.charAt(pos) == '^') {
+      pos++; // Skip '^'
+      result = result ^ evaluateAnd(expr, pos);
+    } else if (pos < expr.length() - 1 && expr.charAt(pos) == '~' && expr.charAt(pos + 1) == '^') {
+      pos += 2; // Skip '~^' (XNOR)
+      result = !(result ^ evaluateAnd(expr, pos));
+    } else {
+      break;
+    }
+  }
+  
+  return result;
+}
+
+// Level 3: AND, NAND (higher precedence)
+bool evaluateAnd(String expr, int& pos) {
+  bool result = evaluateFactor(expr, pos);
+  
+  while (pos < expr.length()) {
+    if (expr.charAt(pos) == '&') {
+      pos++; // Skip '&'
+      result = result && evaluateFactor(expr, pos);
+    } else if (pos < expr.length() - 1 && expr.charAt(pos) == '~' && expr.charAt(pos + 1) == '&') {
+      pos += 2; // Skip '~&' (NAND)
+      result = !(result && evaluateFactor(expr, pos));
+    } else {
+      break;
+    }
+  }
+  
+  return result;
+}
+
+// Level 4: NOT, parentheses, variables (highest precedence)
+bool evaluateFactor(String expr, int& pos) {
+  if (pos >= expr.length()) return false;
+  
+  char c = expr.charAt(pos);
+  
+  if (c == '!') {
+    pos++; // Skip '!'
+    return !evaluateFactor(expr, pos);
+  } else if (c == '(') {
+    pos++; // Skip '('
+    bool result = evaluateOr(expr, pos);
+    if (pos < expr.length() && expr.charAt(pos) == ')') {
+      pos++; // Skip ')'
+    }
+    return result;
+  } else if (isalpha(c)) {
+    pos++; // Skip variable
+    return getVariableValue(c);
+  }
+  
+  return false;
+}
+
+String generateWebPage() {
+  String html = "<!DOCTYPE html>";
+  html += "<html>";
+  html += "<head>";
+  html += "<meta charset=\"UTF-8\">";
+  html += "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">";
+  html += "<title>Logic Evaluator</title>";
+  html += "<style>";
+  html += "body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 0; padding: 20px; background: #f5f5f7; color: #1d1d1f; }";
+  html += ".container { max-width: 800px; margin: 0 auto; background: white; border-radius: 12px; padding: 32px; box-shadow: 0 4px 16px rgba(0, 0, 0, 0.1); }";
+  html += "h1 { text-align: center; margin-bottom: 8px; font-size: 32px; font-weight: 600; }";
+  html += ".subtitle { text-align: center; color: #86868b; margin-bottom: 32px; font-size: 17px; }";
+  html += ".form-group { margin-bottom: 24px; }";
+  html += "label { display: block; margin-bottom: 8px; font-weight: 500; font-size: 17px; }";
+  html += "input[type=\"text\"] { width: 100%; padding: 12px 16px; border: 1px solid #d2d2d7; border-radius: 8px; font-size: 16px; background: #fafafa; box-sizing: border-box; }";
+  html += "input[type=\"text\"]:focus { outline: none; border-color: #007aff; background: white; }";
+  html += ".examples { background: #f2f2f7; padding: 16px; border-radius: 8px; margin-top: 12px; }";
+  html += ".examples h4 { margin: 0 0 8px 0; font-size: 14px; font-weight: 600; color: #1d1d1f; }";
+  html += ".examples code { display: block; font-family: 'SF Mono', Monaco, monospace; font-size: 13px; color: #86868b; margin: 4px 0; }";
+  html += ".button-group { display: flex; gap: 12px; margin-bottom: 24px; }";
+  html += ".evaluate-btn, .truthtable-btn { flex: 1; padding: 16px; border: none; border-radius: 8px; font-size: 17px; font-weight: 500; cursor: pointer; transition: background 0.2s; }";
+  html += ".evaluate-btn { background: #007aff; color: white; }";
+  html += ".evaluate-btn:hover { background: #0056b3; }";
+  html += ".truthtable-btn { background: #34c759; color: white; }";
+  html += ".truthtable-btn:hover { background: #248a3d; }";
+  html += ".result { margin-top: 24px; padding: 20px; border-radius: 8px; text-align: center; }";
+  html += ".result-true { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }";
+  html += ".result-false { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }";
+  html += ".result-waiting { background: #f8f9fa; color: #6c757d; border: 1px solid #e9ecef; }";
+  html += ".result-text { font-size: 24px; font-weight: 600; margin-bottom: 8px; }";
+  html += ".led-status { margin-top: 12px; display: flex; align-items: center; justify-content: center; gap: 8px; }";
+  html += ".led-indicator { width: 12px; height: 12px; border-radius: 50%; background: #ccc; }";
+  html += ".led-on { background: #007aff; box-shadow: 0 0 8px rgba(0, 122, 255, 0.5); }";
+  html += ".truth-table { margin-top: 24px; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1); }";
+  html += ".truth-table table { width: 100%; border-collapse: collapse; }";
+  html += ".truth-table th, .truth-table td { padding: 12px; text-align: center; border-bottom: 1px solid #e9ecef; }";
+  html += ".truth-table th { background: #f8f9fa; font-weight: 600; color: #495057; }";
+  html += ".truth-table tr:hover { background: #f8f9fa; cursor: pointer; }";
+  html += ".truth-table tr.selected { background: #007aff; color: white; }";
+  html += ".truth-table-title { padding: 16px; background: #f8f9fa; font-weight: 600; border-bottom: 1px solid #e9ecef; }";
+  html += ".precedence-info { background: #e3f2fd; padding: 16px; border-radius: 8px; margin-top: 12px; }";
+  html += ".precedence-info h4 { margin: 0 0 8px 0; color: #1565c0; }";
+  html += ".precedence-info code { display: block; font-family: 'SF Mono', Monaco, monospace; font-size: 13px; color: #1565c0; margin: 4px 0; }";
+  html += ".hidden { display: none; }";
+  html += "</style>";
+  html += "</head>";
+  html += "<body>";
+  html += "<div class=\"container\">";
+  html += "<h1>ESP32 Logic Evaluator</h1>";
+  html += "<p class=\"subtitle\">Evaluate Boolean expressions with advanced operators and truth tables</p>";
+  
+  html += "<form id=\"logicForm\">";
+  html += "<div class=\"form-group\">";
+  html += "<label for=\"expression\">Expression</label>";
+  html += "<input type=\"text\" id=\"expression\" name=\"expression\" placeholder=\"!(A & B) | (C ^ D)\" required>";
+  html += "<div class=\"examples\">";
+  html += "<h4>Available Operators</h4>";
+  html += "<code>& (AND), | (OR), ! (NOT), ^ (XOR)</code>";
+  html += "<code>~& (NAND), ~| (NOR), ~^ (XNOR)</code>";
+  html += "<code>() (grouping)</code>";
+  html += "</div>";
+  html += "<div class=\"precedence-info\">";
+  html += "<h4>Operator Precedence (High to Low)</h4>";
+  html += "<code>1. () parentheses, ! NOT</code>";
+  html += "<code>2. & AND, ~& NAND, ^ XOR, ~^ XNOR</code>";
+  html += "<code>3. | OR, ~| NOR</code>";
+  html += "</div>";
+  html += "</div>";
+  
+  html += "<div class=\"form-group\">";
+  html += "<label for=\"variables\">Variables</label>";
+  html += "<input type=\"text\" id=\"variables\" name=\"variables\" placeholder=\"A=1,B=0,C=1,D=0\" required>";
+  html += "<div class=\"examples\">";
+  html += "<h4>Format</h4>";
+  html += "<code>A=1,B=0,C=1,D=0 (1=true, 0=false)</code>";
+  html += "</div>";
+  html += "</div>";
+  
+  html += "<div class=\"button-group\">";
+  html += "<button type=\"submit\" class=\"evaluate-btn\">Evaluate</button>";
+  html += "<button type=\"button\" class=\"truthtable-btn\" onclick=\"generateTruthTable()\">Truth Table</button>";
+  html += "</div>";
+  html += "</form>";
+  
+  html += "<div class=\"result result-waiting\" id=\"result\">";
+  html += "<div class=\"result-text\">Ready</div>";
+  html += "<div>Enter an expression to evaluate</div>";
+  html += "<div class=\"led-status\">";
+  html += "LED: <div class=\"led-indicator\" id=\"ledIndicator\"></div> <span id=\"ledStatus\">OFF</span>";
+  html += "</div>";
+  html += "</div>";
+  
+  html += "<div class=\"truth-table hidden\" id=\"truthTable\">";
+  html += "<div class=\"truth-table-title\">Truth Table - Click any row to test on LED</div>";
+  html += "<table>";
+  html += "<thead id=\"truthTableHead\"></thead>";
+  html += "<tbody id=\"truthTableBody\"></tbody>";
+  html += "</table>";
+  html += "</div>";
+  html += "</div>";
+  
+  // JavaScript section
+  html += "<script>";
+  html += "const form = document.getElementById('logicForm');";
+  html += "const result = document.getElementById('result');";
+  html += "const ledIndicator = document.getElementById('ledIndicator');";
+  html += "const ledStatus = document.getElementById('ledStatus');";
+  html += "const truthTable = document.getElementById('truthTable');";
+  html += "const truthTableHead = document.getElementById('truthTableHead');";
+  html += "const truthTableBody = document.getElementById('truthTableBody');";
+  
+  html += "form.addEventListener('submit', async (e) => {";
+  html += "e.preventDefault();";
+  html += "const expression = document.getElementById('expression').value.trim();";
+  html += "const variables = document.getElementById('variables').value.trim();";
+  html += "if (!expression || !variables) { showError('Please fill in both fields'); return; }";
+  html += "showLoading();";
+  html += "try {";
+  html += "const formData = new FormData();";
+  html += "formData.append('expression', expression);";
+  html += "formData.append('variables', variables);";
+  html += "const response = await fetch('/evaluate', { method: 'POST', body: formData });";
+  html += "const data = await response.json();";
+  html += "if (response.ok) { showResult(data); } else { showError(data.error || 'Evaluation failed'); }";
+  html += "} catch (err) { showError('Network error'); }";
+  html += "});";
+  
+  html += "async function generateTruthTable() {";
+  html += "const expression = document.getElementById('expression').value.trim();";
+  html += "if (!expression) { showError('Please enter an expression first'); return; }";
+  html += "showLoading();";
+  html += "try {";
+  html += "const formData = new FormData();";
+  html += "formData.append('expression', expression);";
+  html += "const response = await fetch('/truthtable', { method: 'POST', body: formData });";
+  html += "const data = await response.json();";
+  html += "if (response.ok) {";
+  html += "displayTruthTable(data);";
+  html += "result.className = 'result result-waiting';";
+  html += "result.innerHTML = '<div class=\"result-text\">Truth Table Generated</div><div>Click any row to test on LED</div><div class=\"led-status\">LED: <div class=\"led-indicator\" id=\"ledIndicator\"></div> <span id=\"ledStatus\">OFF</span></div>';";
+  html += "} else { showError(data.error || 'Truth table generation failed'); }";
+  html += "} catch (err) { showError('Network error'); }";
+  html += "}";
+  
+  html += "function displayTruthTable(data) {";
+  html += "let headerHtml = '<tr>';";
+  html += "data.variables.forEach(variable => { headerHtml += '<th>' + variable + '</th>'; });";
+  html += "headerHtml += '<th>Output</th></tr>';";
+  html += "truthTableHead.innerHTML = headerHtml;";
+  html += "let bodyHtml = '';";
+  html += "data.rows.forEach((row, index) => {";
+  html += "bodyHtml += '<tr onclick=\"testTruthTableRow(\\'' + row.inputs + '\\')\" data-inputs=\"' + row.inputs + '\">';";
+  html += "const inputs = row.inputs.split(',');";
+  html += "inputs.forEach(input => {";
+  html += "const value = input.split('=')[1];";
+  html += "bodyHtml += '<td>' + value + '</td>';";
+  html += "});";
+  html += "bodyHtml += '<td>' + (row.output ? '1' : '0') + '</td>';";
+  html += "bodyHtml += '</tr>';";
+  html += "});";
+  html += "truthTableBody.innerHTML = bodyHtml;";
+  html += "truthTable.classList.remove('hidden');";
+  html += "}";
+  
+  html += "async function testTruthTableRow(inputs) {";
+  html += "document.querySelectorAll('.truth-table tr').forEach(tr => { tr.classList.remove('selected'); });";
+  html += "event.target.closest('tr').classList.add('selected');";
+  html += "try {";
+  html += "const formData = new FormData();";
+  html += "formData.append('variables', inputs);";
+  html += "const response = await fetch('/testrow', { method: 'POST', body: formData });";
+  html += "const data = await response.json();";
+  html += "if (response.ok) {";
+  html += "updateLED(data.result, data.led);";
+  html += "result.className = 'result ' + (data.result ? 'result-true' : 'result-false');";
+  html += "result.innerHTML = '<div class=\"result-text\">' + (data.result ? 'TRUE' : 'FALSE') + '</div><div>Row: ' + inputs + '</div><div class=\"led-status\">LED: <div class=\"led-indicator ' + (data.result ? 'led-on' : '') + '\" id=\"ledIndicator\"></div> <span id=\"ledStatus\">' + data.led + '</span></div>';";
+  html += "} else { showError(data.error || 'Test failed'); }";
+  html += "} catch (err) { showError('Network error'); }";
+  html += "}";
+  
+  html += "function showResult(data) {";
+  html += "const isTrue = data.result;";
+  html += "result.className = 'result ' + (isTrue ? 'result-true' : 'result-false');";
+  html += "result.innerHTML = '<div class=\"result-text\">' + (isTrue ? 'TRUE' : 'FALSE') + '</div><div>' + data.expression + '</div><div class=\"led-status\">LED: <div class=\"led-indicator ' + (isTrue ? 'led-on' : '') + '\" id=\"ledIndicator\"></div> <span id=\"ledStatus\">' + data.led + '</span></div>';";
+  html += "}";
+  
+  html += "function showLoading() {";
+  html += "result.className = 'result result-waiting';";
+  html += "result.innerHTML = '<div class=\"result-text\">Processing...</div><div>Please wait</div><div class=\"led-status\">LED: <div class=\"led-indicator\"></div> <span>-</span></div>';";
+  html += "}";
+  
+  html += "function showError(message) {";
+  html += "result.className = 'result result-waiting';";
+  html += "result.innerHTML = '<div class=\"result-text\">Error</div><div>' + message + '</div><div class=\"led-status\">LED: <div class=\"led-indicator\"></div> <span>OFF</span></div>';";
+  html += "}";
+  
+  html += "function updateLED(isOn, status) {";
+  html += "const indicator = document.getElementById('ledIndicator');";
+  html += "const statusText = document.getElementById('ledStatus');";
+  html += "if (isOn) { indicator.classList.add('led-on'); } else { indicator.classList.remove('led-on'); }";
+  html += "if (statusText) { statusText.textContent = status; }";
+  html += "}";
+  
+  html += "</script>";
+  html += "</body>";
+  html += "</html>";
+  
+  return html;
+}
